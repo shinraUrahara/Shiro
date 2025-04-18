@@ -1,28 +1,22 @@
+import threading
+from flask import Flask
 import os
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
-from flask import Flask
-import threading
+from discord import app_commands  # Slash Commands
+import youtube_dl
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 import asyncio
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime, timedelta
+import json
+import random
 
-# Load environment variables
-from dotenv import load_dotenv
-load_dotenv()
-
-TOKEN = os.getenv("DISCORD_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID"))  # Your Discord user ID
-GUILD_ID = int(os.getenv("GUILD_ID"))  # Your server ID
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", 0))
-
-# Set up Flask to keep Render happy
+# Flask setup (for keeping bot alive)
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Discord bot is running."
+    return "Discord bot is running!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -30,110 +24,146 @@ def run_web():
 
 threading.Thread(target=run_web).start()
 
-# Set up Discord client
+# Discord Bot Setup
 intents = discord.Intents.default()
 intents.message_content = True
-intents.guilds = True
-intents.members = True
+intents.voice_states = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-tree = bot.tree
-scheduler = AsyncIOScheduler()
+bot = commands.Bot(command_prefix='!', intents=intents)
+tree = app_commands.CommandTree(bot)  # Slash commands
 
-# Utility: Admin check
-def is_admin(interaction: discord.Interaction) -> bool:
-    return interaction.user.guild_permissions.administrator or interaction.user.id == OWNER_ID
+# Spotify Setup (optional)
+SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
+if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+    sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET
+    ))
+else:
+    print("Spotify support disabled (missing credentials)")
 
-# On Ready
+# Music Queue
+queue = []
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
+YDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'quiet': True,
+    'extract_flat': True
+}
+
+# ===== Slash Commands Setup =====
+@tree.command(name="help", description="Show all available commands")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🎵 Music Bot Commands",
+        description="Here's what I can do:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="🎶 Music",
+        value="`/play [url]` - Play YouTube/Spotify\n`/skip` - Skip song\n`/stop` - Stop music",
+        inline=False
+    )
+    embed.add_field(
+        name="📊 Leveling",
+        value="`/rank` - Check your level\n`/leaderboard` - Top users",
+        inline=False
+    )
+    await interaction.response.send_message(embed=embed)
+
+# ===== Music Commands (Slash) =====
+@tree.command(name="play", description="Play a song from YouTube or Spotify")
+async def play(interaction: discord.Interaction, url: str):
+    await interation.response.defer()  # Bot is "thinking"
+
+    # Check if user is in a voice channel
+    if not interaction.user.voice:
+        await interaction.followup.send("❌ You must be in a voice channel!")
+        return
+
+    voice_client = interaction.guild.voice_client
+    if not voice_client:
+        voice_client = await interaction.user.voice.channel.connect()
+    elif voice_client.channel != interaction.user.voice.channel:
+        await voice_client.move_to(interaction.user.voice.channel)
+
+    # Check if URL is Spotify
+    if "open.spotify.com" in url:
+        if not SPOTIFY_CLIENT_ID:
+            await interaction.followup.send("❌ Spotify support is disabled (missing API keys)")
+            return
+
+        try:
+            if "track" in url:  # Single track
+                track = sp.track(url)
+                query = f"{track['name']} {track['artists'][0]['name']}"
+            elif "playlist" in url:  # Playlist
+                playlist = sp.playlist_tracks(url)
+                for item in playlist['items']:
+                    track = item['track']
+                    query = f"{track['name']} {track['artists'][0]['name']}"
+                    await add_to_queue(query, interaction)
+                await interaction.followup.send(f"✅ Added {len(playlist['items'])} songs from Spotify!")
+                return
+        except Exception as e:
+            await interaction.followup.send(f"❌ Spotify error: {e}")
+            return
+    else:
+        query = url  # YouTube URL
+
+    await add_to_queue(query, interaction)
+    await interaction.followup.send(f"✅ Added to queue: `{query}`")
+
+async def add_to_queue(query: str, interaction: discord.Interaction):
+    with youtube_dl.YoutubeDL(YDL_OPTIONS) as ydl:
+        try:
+            info = ydl.extract_info(f"ytsearch:{query}", download=False)
+            url = info['entries'][0]['url']
+            queue.append(url)
+            if not interaction.guild.voice_client.is_playing():
+                await play_next(interaction)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}")
+
+async def play_next(interaction: discord.Interaction):
+    if queue:
+        voice_client = interaction.guild.voice_client
+        voice_client.play(
+            discord.FFmpegPCMAudio(queue.pop(0), 
+            after=lambda e: asyncio.run_coroutine_threadsafe(play_next(interaction), bot.loop)
+        )
+
+@tree.command(name="skip", description="Skip the current song")
+async def skip(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    if voice_client and voice_client.is_playing():
+        voice_client.stop()
+        await interaction.response.send_message("⏭️ Skipped!")
+    else:
+        await interaction.response.send_message("❌ Nothing is playing!")
+
+# ===== Leveling System (Slash) =====
+@tree.command(name="rank", description="Check your level and XP")
+async def rank(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    level_data = levels.get(user_id, {"xp": 0, "level": 1})
+    await interaction.response.send_message(
+        f"🎖️ **{interaction.user.display_name}**\n"
+        f"Level: **{level_data['level']}**\n"
+        f"XP: **{level_data['xp']}**"
+    )
+
+# ===== Run Bot =====
 @bot.event
 async def on_ready():
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    print(f"Logged in as {bot.user} | Synced commands")
-    scheduler.start()
+    await tree.sync()  # Sync slash commands
+    print(f"Logged in as {bot.user.name}")
 
-# Log function
-async def log_action(guild: discord.Guild, message: str):
-    if LOG_CHANNEL_ID:
-        channel = guild.get_channel(LOG_CHANNEL_ID)
-        if channel:
-            await channel.send(message)
-
-# Admin Commands
-@tree.command(name="ban", description="Ban a member", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(member="Member to ban", reason="Reason")
-async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
-    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
-    await member.ban(reason=reason)
-    await interaction.response.send_message(f"{member} was banned. Reason: {reason}")
-    await log_action(interaction.guild, f"{member} was banned by {interaction.user}. Reason: {reason}")
-
-@tree.command(name="kick", description="Kick a member", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(member="Member to kick")
-async def kick(interaction: discord.Interaction, member: discord.Member):
-    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
-    await member.kick()
-    await interaction.response.send_message(f"{member} was kicked.")
-    await log_action(interaction.guild, f"{member} was kicked by {interaction.user}.")
-
-@tree.command(name="mute", description="Timeout a member", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(member="Member to mute", duration="Duration in minutes")
-async def mute(interaction: discord.Interaction, member: discord.Member, duration: int):
-    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
-    until = datetime.utcnow() + timedelta(minutes=duration)
-    await member.timeout(until, reason=f"Muted by {interaction.user}")
-    await interaction.response.send_message(f"{member} has been muted for {duration} minutes.")
-    await log_action(interaction.guild, f"{member} was muted by {interaction.user} for {duration} minutes.")
-
-@tree.command(name="unmute", description="Remove timeout from member", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(member="Member to unmute")
-async def unmute(interaction: discord.Interaction, member: discord.Member):
-    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
-    await member.timeout(None)
-    await interaction.response.send_message(f"{member} has been unmuted.")
-    await log_action(interaction.guild, f"{member} was unmuted by {interaction.user}.")
-
-@tree.command(name="warn", description="Warn a user", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(member="User to warn", reason="Reason")
-async def warn(interaction: discord.Interaction, member: discord.Member, reason: str):
-    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
-    await interaction.response.send_message(f"{member.mention} has been warned: {reason}")
-    await log_action(interaction.guild, f"{member} was warned by {interaction.user}. Reason: {reason}")
-
-@tree.command(name="purge", description="Delete messages", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(amount="Number of messages to delete")
-async def purge(interaction: discord.Interaction, amount: int):
-    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
-    await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(f"Deleted {amount} messages.", ephemeral=True)
-
-# Public Commands
-@tree.command(name="schedule", description="Schedule a message", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(minutes="Minutes to wait", message="Message to send")
-async def schedule(interaction: discord.Interaction, minutes: int, message: str):
-    async def send_later():
-        await asyncio.sleep(minutes * 60)
-        await interaction.channel.send(f"[Scheduled] {message}")
-    asyncio.create_task(send_later())
-    await interaction.response.send_message(f"Scheduled message in {minutes} minutes.", ephemeral=True)
-
-@tree.command(name="announce", description="Send a message to a channel", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(channel="Target channel", message="Message to send")
-async def announce(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
-    await channel.send(message)
-    await interaction.response.send_message(f"Sent message to {channel.mention}", ephemeral=True)
-
-@tree.command(name="upload", description="Upload a file", guild=discord.Object(id=GUILD_ID))
-async def upload(interaction: discord.Interaction):
-    await interaction.response.send_message("Please upload a file with this command.", ephemeral=True)
-
-@tree.command(name="help", description="List all commands", guild=discord.Object(id=GUILD_ID))
-async def help_cmd(interaction: discord.Interaction):
-    await interaction.response.send_message("""
-**Admin-only:**
-/ban, /kick, /mute, /unmute, /warn, /purge
-
-**Everyone:**
-/schedule, /announce, /upload, /help
-""", ephemeral=True)
-
-bot.run(TOKEN)
+bot_token = os.getenv('DISCORD_TOKEN')
+if not bot_token:
+    raise ValueError("No DISCORD_TOKEN set!")
+bot.run(bot_token)
