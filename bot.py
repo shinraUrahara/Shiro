@@ -30,7 +30,7 @@ intents.message_content = True
 intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
-tree = app_commands.CommandTree(bot)
+tree = bot.tree  # ✅ FIXED
 
 # Spotify Setup
 SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
@@ -279,7 +279,7 @@ async def leaderboard(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     await tree.sync()
-    print(f"Logged in as {bot.user.name}")
+    print(f"✅ Logged in as {bot.user.name}")
 
 bot_token = os.getenv('DISCORD_TOKEN')
 if not bot_token:
