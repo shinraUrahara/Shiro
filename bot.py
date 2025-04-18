@@ -11,7 +11,7 @@ import asyncio
 import json
 import random
 
-# Flask setup (for keeping bot alive)
+# Flask setup (for Render or similar hosts)
 app = Flask(__name__)
 
 @app.route('/')
@@ -24,13 +24,16 @@ def run_web():
 
 threading.Thread(target=run_web).start()
 
-# Discord Bot Setup
+# Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
-tree = bot.tree  # ✅ FIXED
+tree = bot.tree  # ← Fix: Use the built-in command tree
+
+# GUILD ID for fast command sync during development
+GUILD_ID = discord.Object(id=1357634699375284346)  # ← Replace this with your guild/server ID
 
 # Spotify Setup
 SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
@@ -58,6 +61,7 @@ YDL_OPTIONS = {
     'extract_flat': True
 }
 
+# Level system
 levels = {}
 
 def load_levels():
@@ -93,7 +97,7 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # Slash Commands
-@tree.command(name="help", description="Show all commands")
+@tree.command(name="help", description="Show all commands", guild=GUILD_ID)
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.blue())
     embed.add_field(name="🎵 Music", value="/play, /playskip, /skip, /stop, /pause, /resume, /volume, /nowplaying, /queue, /loop", inline=False)
@@ -131,7 +135,7 @@ async def add_to_queue(query: str, interaction: discord.Interaction):
         if not interaction.guild.voice_client.is_playing():
             await play_next(interaction)
 
-@tree.command(name="play", description="Play a song")
+@tree.command(name="play", description="Play a song", guild=GUILD_ID)
 async def play(interaction: discord.Interaction, url: str):
     await interaction.response.defer()
     if not interaction.user.voice:
@@ -167,7 +171,7 @@ async def play(interaction: discord.Interaction, url: str):
         await add_to_queue(url, interaction)
         await interaction.followup.send(f"✅ Added to queue!")
 
-@tree.command(name="playskip", description="Skip current and play song immediately")
+@tree.command(name="playskip", description="Skip current and play song immediately", guild=GUILD_ID)
 async def playskip(interaction: discord.Interaction, url: str):
     await interaction.response.defer()
     if not interaction.user.voice:
@@ -190,7 +194,7 @@ async def playskip(interaction: discord.Interaction, url: str):
             await play_next(interaction)
     await interaction.followup.send("⏭️ Playing now!")
 
-@tree.command(name="skip", description="Skip current song")
+@tree.command(name="skip", description="Skip current song", guild=GUILD_ID)
 async def skip(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
@@ -199,7 +203,7 @@ async def skip(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ Nothing playing!")
 
-@tree.command(name="stop", description="Stop music and clear queue")
+@tree.command(name="stop", description="Stop music and clear queue", guild=GUILD_ID)
 async def stop(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc:
@@ -210,7 +214,7 @@ async def stop(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ Not in voice channel!")
 
-@tree.command(name="pause", description="Pause current song")
+@tree.command(name="pause", description="Pause current song", guild=GUILD_ID)
 async def pause(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
@@ -219,7 +223,7 @@ async def pause(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ Nothing to pause!")
 
-@tree.command(name="resume", description="Resume paused song")
+@tree.command(name="resume", description="Resume paused song", guild=GUILD_ID)
 async def resume(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_paused():
@@ -228,7 +232,7 @@ async def resume(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ Nothing is paused!")
 
-@tree.command(name="volume", description="Set the music volume (1-100)")
+@tree.command(name="volume", description="Set the music volume (1-100)", guild=GUILD_ID)
 @app_commands.describe(level="Volume level from 1 to 100")
 async def volume(interaction: discord.Interaction, level: int):
     global volume_level
@@ -238,14 +242,14 @@ async def volume(interaction: discord.Interaction, level: int):
     else:
         await interaction.response.send_message("❌ Please provide a volume between 1 and 100.")
 
-@tree.command(name="nowplaying", description="Show currently playing song")
+@tree.command(name="nowplaying", description="Show currently playing song", guild=GUILD_ID)
 async def nowplaying(interaction: discord.Interaction):
     if current_song:
         await interaction.response.send_message(f"🎶 Now Playing: {current_song}")
     else:
         await interaction.response.send_message("❌ Nothing is playing.")
 
-@tree.command(name="queue", description="Show the music queue")
+@tree.command(name="queue", description="Show the music queue", guild=GUILD_ID)
 async def show_queue(interaction: discord.Interaction):
     if queue:
         msg = "\n".join([f"{i+1}. {url}" for i, url in enumerate(queue)])
@@ -253,13 +257,13 @@ async def show_queue(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("📭 The queue is empty.")
 
-@tree.command(name="loop", description="Toggle looping for current song")
+@tree.command(name="loop", description="Toggle looping for current song", guild=GUILD_ID)
 async def loop(interaction: discord.Interaction):
     global loop_enabled
     loop_enabled = not loop_enabled
     await interaction.response.send_message(f"🔁 Looping is now {'enabled' if loop_enabled else 'disabled'}.")
 
-@tree.command(name="rank", description="Check your level")
+@tree.command(name="rank", description="Check your level", guild=GUILD_ID)
 async def rank(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     level_data = levels.get(user_id, {"xp": 0, "level": 1})
@@ -267,7 +271,7 @@ async def rank(interaction: discord.Interaction):
         f"🏆 **{interaction.user.display_name}**\nLevel: {level_data['level']}\nXP: {level_data['xp']}/{level_data['level'] * 100}"
     )
 
-@tree.command(name="leaderboard", description="Show top 10 users")
+@tree.command(name="leaderboard", description="Show top 10 users", guild=GUILD_ID)
 async def leaderboard(interaction: discord.Interaction):
     sorted_users = sorted(levels.items(), key=lambda x: (x[1]['level'], x[1]['xp']), reverse=True)[:10]
     embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.gold())
@@ -278,9 +282,15 @@ async def leaderboard(interaction: discord.Interaction):
 
 @bot.event
 async def on_ready():
-    await tree.sync()
+    await bot.wait_until_ready()
+    try:
+        synced = await tree.sync(guild=GUILD_ID)
+        print(f"✅ Synced {len(synced)} commands to guild {GUILD_ID.id}")
+    except Exception as e:
+        print(f"❌ Command sync failed: {e}")
     print(f"✅ Logged in as {bot.user.name}")
 
+# Run the bot
 bot_token = os.getenv('DISCORD_TOKEN')
 if not bot_token:
     raise ValueError("No DISCORD_TOKEN set!")
