@@ -1,3 +1,19 @@
+import threading
+from flask import Flask
+import os
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Discord bot is running."
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))  # use Render-assigned port or fallback
+    app.run(host='0.0.0.0', port=port)
+
+# Start Flask in a separate thread
+threading.Thread(target=run_web).start()
 import discord
 from discord.ext import commands, tasks
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
