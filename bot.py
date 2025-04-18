@@ -1,7 +1,23 @@
-import threading
-from flask import Flask
 import os
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
+from flask import Flask
+import threading
+import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from datetime import datetime, timedelta
 
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID"))  # Your Discord user ID
+GUILD_ID = int(os.getenv("GUILD_ID"))  # Your server ID
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", 0))
+
+# Set up Flask to keep Render happy
 app = Flask(__name__)
 
 @app.route('/')
@@ -9,116 +25,115 @@ def home():
     return "Discord bot is running."
 
 def run_web():
-    port = int(os.environ.get("PORT", 10000))  # use Render-assigned port or fallback
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# Start Flask in a separate thread
 threading.Thread(target=run_web).start()
-import discord
-from discord.ext import commands, tasks
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-import os
-from dotenv import load_dotenv
-import asyncio
 
-load_dotenv()
+# Set up Discord client
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID"))
-CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
-
-intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
+tree = bot.tree
 scheduler = AsyncIOScheduler()
 
-# Check for owner permission
-def is_owner():
-    async def predicate(ctx):
-        return ctx.author.id == OWNER_ID
-    return commands.check(predicate)
+# Utility: Admin check
+def is_admin(interaction: discord.Interaction) -> bool:
+    return interaction.user.guild_permissions.administrator or interaction.user.id == OWNER_ID
 
+# On Ready
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-    print("------")
+    await tree.sync(guild=discord.Object(id=GUILD_ID))
+    print(f"Logged in as {bot.user} | Synced commands")
     scheduler.start()
 
-@bot.command()
-@is_owner()
-async def shutdown(ctx):
-    await ctx.send("Shutting down 📴")
-    await bot.close()
+# Log function
+async def log_action(guild: discord.Guild, message: str):
+    if LOG_CHANNEL_ID:
+        channel = guild.get_channel(LOG_CHANNEL_ID)
+        if channel:
+            await channel.send(message)
 
-@bot.command()
-async def ping(ctx):
-    await ctx.send(f"Pong! 🏓 Latency: {round(bot.latency * 1000)}ms")
+# Admin Commands
+@tree.command(name="ban", description="Ban a member", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(member="Member to ban", reason="Reason")
+async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
+    await member.ban(reason=reason)
+    await interaction.response.send_message(f"{member} was banned. Reason: {reason}")
+    await log_action(interaction.guild, f"{member} was banned by {interaction.user}. Reason: {reason}")
 
-@bot.command()
-@is_owner()
-async def restart(ctx):
-    await ctx.send("Restarting bot... 🔄")
-    await bot.close()
-    await bot.run(TOKEN)
+@tree.command(name="kick", description="Kick a member", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(member="Member to kick")
+async def kick(interaction: discord.Interaction, member: discord.Member):
+    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
+    await member.kick()
+    await interaction.response.send_message(f"{member} was kicked.")
+    await log_action(interaction.guild, f"{member} was kicked by {interaction.user}.")
 
-@bot.command()
-@is_owner()
-async def say(ctx, *, message):
-    await ctx.send(message)
+@tree.command(name="mute", description="Timeout a member", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(member="Member to mute", duration="Duration in minutes")
+async def mute(interaction: discord.Interaction, member: discord.Member, duration: int):
+    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
+    until = datetime.utcnow() + timedelta(minutes=duration)
+    await member.timeout(until, reason=f"Muted by {interaction.user}")
+    await interaction.response.send_message(f"{member} has been muted for {duration} minutes.")
+    await log_action(interaction.guild, f"{member} was muted by {interaction.user} for {duration} minutes.")
 
-@bot.command()
-@is_owner()
-async def ban(ctx, user: discord.User, reason: str = "No reason provided"):
-    await ctx.guild.ban(user, reason=reason)
-    await ctx.send(f"Banned {user.name} for: {reason}")
-    log_channel = bot.get_channel(CHANNEL_ID)
-    await log_channel.send(f"Banned {user.name} for: {reason}")
+@tree.command(name="unmute", description="Remove timeout from member", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(member="Member to unmute")
+async def unmute(interaction: discord.Interaction, member: discord.Member):
+    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
+    await member.timeout(None)
+    await interaction.response.send_message(f"{member} has been unmuted.")
+    await log_action(interaction.guild, f"{member} was unmuted by {interaction.user}.")
 
-@bot.command()
-@is_owner()
-async def kick(ctx, user: discord.User, reason: str = "No reason provided"):
-    await ctx.guild.kick(user, reason=reason)
-    await ctx.send(f"Kicked {user.name} for: {reason}")
-    log_channel = bot.get_channel(CHANNEL_ID)
-    await log_channel.send(f"Kicked {user.name} for: {reason}")
+@tree.command(name="warn", description="Warn a user", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(member="User to warn", reason="Reason")
+async def warn(interaction: discord.Interaction, member: discord.Member, reason: str):
+    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
+    await interaction.response.send_message(f"{member.mention} has been warned: {reason}")
+    await log_action(interaction.guild, f"{member} was warned by {interaction.user}. Reason: {reason}")
 
-@bot.command()
-@is_owner()
-async def mute(ctx, user: discord.User, time: int, reason: str = "No reason provided"):
-    # Mute the user for `time` seconds
-    muted_role = discord.utils.get(ctx.guild.roles, name="Muted")
-    await user.add_roles(muted_role)
-    await ctx.send(f"Muted {user.name} for {time} seconds.")
-    log_channel = bot.get_channel(CHANNEL_ID)
-    await log_channel.send(f"Muted {user.name} for {time} seconds. Reason: {reason}")
-    await asyncio.sleep(time)
-    await user.remove_roles(muted_role)
+@tree.command(name="purge", description="Delete messages", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(amount="Number of messages to delete")
+async def purge(interaction: discord.Interaction, amount: int):
+    if not is_admin(interaction): return await interaction.response.send_message("You aren't allowed to use this.", ephemeral=True)
+    await interaction.channel.purge(limit=amount)
+    await interaction.response.send_message(f"Deleted {amount} messages.", ephemeral=True)
 
-@bot.command()
-async def members(ctx):
-    guild = ctx.guild
-    await ctx.send(f"👥 Members in {guild.name}: {guild.member_count}")
+# Public Commands
+@tree.command(name="schedule", description="Schedule a message", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(minutes="Minutes to wait", message="Message to send")
+async def schedule(interaction: discord.Interaction, minutes: int, message: str):
+    async def send_later():
+        await asyncio.sleep(minutes * 60)
+        await interaction.channel.send(f"[Scheduled] {message}")
+    asyncio.create_task(send_later())
+    await interaction.response.send_message(f"Scheduled message in {minutes} minutes.", ephemeral=True)
 
-# Scheduler Task Example
-@scheduler.scheduled_job(IntervalTrigger(hours=1))
-async def scheduled_task():
-    log_channel = bot.get_channel(CHANNEL_ID)
-    await log_channel.send("⏰ Hourly Reminder!")
+@tree.command(name="announce", description="Send a message to a channel", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(channel="Target channel", message="Message to send")
+async def announce(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
+    await channel.send(message)
+    await interaction.response.send_message(f"Sent message to {channel.mention}", ephemeral=True)
 
-@bot.command()
-@is_owner()
-async def upload(ctx, file: discord.File):
-    await ctx.send("Uploading file!")
-    await ctx.send(file=file)
+@tree.command(name="upload", description="Upload a file", guild=discord.Object(id=GUILD_ID))
+async def upload(interaction: discord.Interaction):
+    await interaction.response.send_message("Please upload a file with this command.", ephemeral=True)
 
-# Logging important actions
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-        return
-    if message.content.startswith("!"):
-        log_channel = bot.get_channel(CHANNEL_ID)
-        await log_channel.send(f"Command {message.content} used by {message.author.name}")
-    await bot.process_commands(message)
+@tree.command(name="help", description="List all commands", guild=discord.Object(id=GUILD_ID))
+async def help_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message("""
+**Admin-only:**
+/ban, /kick, /mute, /unmute, /warn, /purge
+
+**Everyone:**
+/schedule, /announce, /upload, /help
+""", ephemeral=True)
 
 bot.run(TOKEN)
