@@ -1,6 +1,5 @@
-discord.py
-apscheduler
-python-dotenv
 flask
+discord.py>=2.3.0
+yt-dlp
 spotipy
-youtube_dl
+PyNaCl
